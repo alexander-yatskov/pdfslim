@@ -18,13 +18,46 @@ Version: `0.1.0`
 - soft memory limit and controlled shutdown;
 - atomic output that does not overwrite the source file.
 
-## Requirements
+## Install a release build
+
+Download the archive for your system from the
+[latest GitHub Release](https://github.com/alexander-yatskov/pdfslim/releases/latest):
+
+| System | Archive |
+| --- | --- |
+| macOS Apple Silicon | `pdfslim_v0.1.0_darwin_arm64.tar.gz` |
+| macOS Intel | `pdfslim_v0.1.0_darwin_amd64.tar.gz` |
+| Windows x64 | `pdfslim_v0.1.0_windows_amd64.zip` |
+| Windows ARM64 | `pdfslim_v0.1.0_windows_arm64.zip` |
+| Linux x64 | `pdfslim_v0.1.0_linux_amd64.tar.gz` |
+| Linux ARM64 | `pdfslim_v0.1.0_linux_arm64.tar.gz` |
+
+Extract the archive. Then move `pdfslim` or `pdfslim.exe` to a directory in
+your `PATH`.
+
+On macOS and Linux:
+
+```sh
+tar -xzf pdfslim_v0.1.0_darwin_arm64.tar.gz
+sudo install pdfslim_v0.1.0_darwin_arm64/pdfslim /usr/local/bin/pdfslim
+pdfslim --version
+```
+
+On Windows, extract the ZIP archive and run:
+
+```powershell
+.\pdfslim.exe --version
+```
+
+Each release includes `SHA256SUMS`. Use it to verify the downloaded archive.
+
+## Build from source
+
+### Requirements
 
 - Go 1.26.5 or newer.
 
 No C libraries or external PDF tools are required.
-
-## Build
 
 ```sh
 git clone https://github.com/alexander-yatskov/pdfslim.git
