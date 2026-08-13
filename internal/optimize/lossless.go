@@ -3,9 +3,9 @@ package optimize
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"image"
-	"image/color"
 	"image/jpeg"
 	"io"
 	"os"
@@ -451,7 +451,7 @@ func optimizeTransparentImage(ctx *model.Context, objNr int, imageObject *model.
 	}
 	maskStream, _, err := ctx.DereferenceStreamDict(*maskRef)
 	if err != nil || maskStream == nil || maskStream.StreamLength == nil {
-		return err
+		return nil
 	}
 
 	colorImage, err := decodeStreamImage(ctx, sd, objNr)
@@ -590,12 +590,12 @@ func grayTile(src image.Image, bounds image.Rectangle) ([]byte, alphaClass) {
 	buf := make([]byte, 0, bounds.Dx()*bounds.Dy())
 	allZero, allFull := true, true
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			gray := color.GrayModel.Convert(src.At(x, y)).(color.Gray).Y
+		visitImageRowRange(src, y, bounds.Min.X, bounds.Max.X, func(_ int, r, g, b byte) {
+			gray := byte((19595*uint32(r) + 38470*uint32(g) + 7471*uint32(b) + 1<<15) >> 16)
 			buf = append(buf, gray)
 			allZero = allZero && gray == 0
 			allFull = allFull && gray == 255
-		}
+		})
 	}
 	if allZero {
 		return buf, alphaTransparent
@@ -616,7 +616,7 @@ func cropRGBA(src image.Image, bounds image.Rectangle) *image.RGBA {
 // stream. Font dictionaries, encodings, widths, character maps, and metadata
 // stay unchanged.
 func deduplicateFontFiles(ctx *model.Context) error {
-	var canonical []types.IndirectRef
+	canonical := map[[sha256.Size]byte][]types.IndirectRef{}
 	objectNumbers := make([]int, 0, len(ctx.Table))
 	for objectNumber := range ctx.Table {
 		objectNumbers = append(objectNumbers, objectNumber)
@@ -641,7 +641,15 @@ func deduplicateFontFiles(ctx *model.Context) error {
 			if ref == nil {
 				continue
 			}
-			duplicate, err := identicalFontFile(ctx, *ref, canonical)
+			stream, _, err := ctx.DereferenceStreamDict(*ref)
+			if err != nil {
+				return err
+			}
+			if stream == nil {
+				continue
+			}
+			hash := fontStreamHash(stream)
+			duplicate, err := identicalFontFile(ctx, stream, canonical[hash])
 			if err != nil {
 				return err
 			}
@@ -651,20 +659,20 @@ func deduplicateFontFiles(ctx *model.Context) error {
 				ctx.Optimize.DuplicateFontObjs[ref.ObjectNumber.Value()] = true
 				continue
 			}
-			canonical = append(canonical, *ref)
+			canonical[hash] = append(canonical[hash], *ref)
 		}
 	}
 	return nil
 }
 
-func identicalFontFile(ctx *model.Context, candidate types.IndirectRef, canonical []types.IndirectRef) (*types.IndirectRef, error) {
-	candidateStream, _, err := ctx.DereferenceStreamDict(candidate)
-	if err != nil {
-		return nil, err
+func fontStreamHash(stream *types.StreamDict) [sha256.Size]byte {
+	if len(stream.Raw) > 0 {
+		return sha256.Sum256(stream.Raw)
 	}
-	if candidateStream == nil {
-		return nil, nil
-	}
+	return sha256.Sum256(stream.Content)
+}
+
+func identicalFontFile(ctx *model.Context, candidateStream *types.StreamDict, canonical []types.IndirectRef) (*types.IndirectRef, error) {
 	for _, ref := range canonical {
 		stream, _, err := ctx.DereferenceStreamDict(ref)
 		if err != nil {

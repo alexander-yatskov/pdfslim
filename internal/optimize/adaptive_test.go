@@ -70,7 +70,90 @@ func TestIndexedPixelsRejectsMoreThan256Colors(t *testing.T) {
 	}
 }
 
-func TestAdaptiveImageChoosesCCITTGroup4ForBinaryGraphics(t *testing.T) {
+func TestIndexedCandidateUsesPackedBits(t *testing.T) {
+	for _, tc := range []struct{ colors, bpc int }{{2, 1}, {16, 4}, {17, 8}} {
+		img := image.NewNRGBA(image.Rect(0, 0, 19, 7))
+		for y := 0; y < 7; y++ {
+			for x := 0; x < 19; x++ {
+				v := byte((x + y*19) % tc.colors)
+				img.SetNRGBA(x, y, color.NRGBA{R: v, G: 255 - v, B: v * 11, A: 255})
+			}
+		}
+		candidate, ok, err := writeIndexedCandidate(img, t.TempDir())
+		if err != nil || !ok {
+			t.Fatalf("colors=%d ok=%v err=%v", tc.colors, ok, err)
+		}
+		if candidate.bpc != tc.bpc {
+			t.Fatalf("colors=%d bpc=%d, want %d", tc.colors, candidate.bpc, tc.bpc)
+		}
+		data, err := os.ReadFile(candidate.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sd := encodedImageStream(data, 19, 7, candidate.colorSpace, candidate.bpc, candidate.filter, nil)
+		if err := sd.Decode(); err != nil {
+			t.Fatal(err)
+		}
+		r, _, err := pdfcpu.RenderImage(&model.XRefTable{}, sd, false, "", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, _, err := image.Decode(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []image.Point{{0, 0}, {18, 0}, {3, 6}, {18, 6}} {
+			want := color.NRGBAModel.Convert(img.At(p.X, p.Y)).(color.NRGBA)
+			got := color.NRGBAModel.Convert(decoded.At(p.X, p.Y)).(color.NRGBA)
+			if got.R != want.R || got.G != want.G || got.B != want.B {
+				t.Fatalf("colors=%d pixel=%v got=%v want=%v", tc.colors, p, got, want)
+			}
+		}
+	}
+}
+
+func TestInterpolateOnlyForSmallImages(t *testing.T) {
+	small := encodedImageStream([]byte{0}, 800, 800, types.Name(model.DeviceGrayCS), 8, filter.Flate, nil)
+	if small.BooleanEntry("Interpolate") == nil {
+		t.Fatal("small image has no Interpolate hint")
+	}
+	wide := encodedImageStream([]byte{0}, 5000, 800, types.Name(model.DeviceGrayCS), 8, filter.Flate, nil)
+	if wide.BooleanEntry("Interpolate") != nil {
+		t.Fatal("wide image has Interpolate hint")
+	}
+}
+
+func TestAnalyzeImageConcreteTypes(t *testing.T) {
+	images := []image.Image{
+		image.NewGray(image.Rect(0, 0, 3, 2)),
+		image.NewRGBA(image.Rect(0, 0, 3, 2)),
+		image.NewNRGBA(image.Rect(0, 0, 3, 2)),
+		&image.YCbCr{Y: []byte{0, 255, 0, 255, 0, 255}, Cb: []byte{128, 128, 128, 128, 128, 128}, Cr: []byte{128, 128, 128, 128, 128, 128}, YStride: 3, CStride: 3, SubsampleRatio: image.YCbCrSubsampleRatio444, Rect: image.Rect(0, 0, 3, 2)},
+	}
+	for _, img := range images {
+		a := analyzeImage(img)
+		if !a.gray || !a.bilevel || !a.indexed {
+			t.Fatalf("%T analysis=%+v", img, a)
+		}
+	}
+}
+
+func TestVisitImageRowHandlesSubImageStrideAndOrigin(t *testing.T) {
+	parent := image.NewNRGBA(image.Rect(0, 0, 10, 10))
+	parent.SetNRGBA(4, 5, color.NRGBA{R: 11, G: 22, B: 33, A: 255})
+	sub := parent.SubImage(image.Rect(4, 5, 7, 8)).(*image.NRGBA)
+	var got [3]byte
+	visitImageRow(sub, 5, func(x int, r, g, b byte) {
+		if x == 4 {
+			got = [3]byte{r, g, b}
+		}
+	})
+	if got != [3]byte{11, 22, 33} {
+		t.Fatalf("pixel=%v", got)
+	}
+}
+
+func TestCCITTGroup4CandidateForBinaryGraphics(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 1728, 2200))
 	for i := range img.Pix {
 		img.Pix[i] = 255
@@ -84,10 +167,18 @@ func TestAdaptiveImageChoosesCCITTGroup4ForBinaryGraphics(t *testing.T) {
 		}
 	}
 	tempDir := t.TempDir()
-	sd, err := adaptiveImageStream(img, 68, tempDir)
+	candidate, ok, err := writeCCITTG4Candidate(img, tempDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !ok {
+		t.Fatal("binary image was rejected")
+	}
+	data, err := os.ReadFile(candidate.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd := encodedImageStream(data, 1728, 2200, candidate.colorSpace, candidate.bpc, candidate.filter, candidate.decodeParms)
 	if !sd.HasSoleFilterNamed(filter.CCITTFax) {
 		t.Fatalf("filter = %v, want CCITTFaxDecode", sd.FilterPipeline)
 	}
@@ -98,7 +189,6 @@ func TestAdaptiveImageChoosesCCITTGroup4ForBinaryGraphics(t *testing.T) {
 	if dp == nil || dp.IntEntry("K") == nil || *dp.IntEntry("K") != -1 {
 		t.Fatalf("DecodeParms = %v, want Group 4 K=-1", dp)
 	}
-	assertEmptyDirectory(t, tempDir)
 }
 
 func TestAdaptiveImageDoesNotReencodeExistingOneBitObjectAsCCITT(t *testing.T) {

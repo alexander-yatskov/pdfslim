@@ -206,6 +206,20 @@ func TestGrayTileClassification(t *testing.T) {
 	}
 }
 
+func TestOptimizeTransparentImageSkipsBrokenSMaskReference(t *testing.T) {
+	length := int64(10)
+	missingMask := *types.NewIndirectRef(99, 0)
+	sd := &types.StreamDict{Dict: types.Dict{
+		"Width": types.Integer(100), "Height": types.Integer(100), "SMask": missingMask,
+	}, StreamLength: &length}
+	ctx := &model.Context{XRefTable: &model.XRefTable{Table: map[int]*model.XRefTableEntry{}}}
+	imageObject := &model.ImageObject{ImageDict: sd, ResourceNames: map[int]string{}}
+	settings := imageSettings{memoryBudget: NewMemoryBudget(0)}
+	if err := optimizeTransparentImage(ctx, 1, imageObject, nil, nil, settings); err != nil {
+		t.Fatalf("broken SMask aborted optimization: %v", err)
+	}
+}
+
 func minimalPDF() []byte {
 	objects := []string{
 		"<< /Type /Catalog /Pages 2 0 R >>",
