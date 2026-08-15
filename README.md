@@ -108,7 +108,7 @@ Set an explicit output path:
 | `screen` | Up to 144 DPI, JPEG quality 72 |
 | `print` | Up to 300 DPI, JPEG quality 90 |
 | `ebook` | Up to 104 DPI, JPEG quality 68 |
-| `aggressive` | Up to 104 DPI, JPEG quality 65, tiled soft-mask processing |
+| `aggressive` | Up to 104 DPI, JPEG quality 65, transparent-image processing |
 
 Image presets compare several relevant encodings and keep the smallest stream.
 An original image stays unchanged when all new candidates are larger.
@@ -168,7 +168,7 @@ jobs, removes its temporary files, and exits with code 130.
 ## Current limits
 
 - directory processing is not recursive;
-- tiled output does not provide tiled decoding;
+- transparent images are optimized only with the `aggressive` preset;
 - JPEG 2000 can be decoded, but new JPEG 2000 streams are not encoded;
 - signed PDFs are reported and not modified safely as signed documents;
 - image recompression can take much more time than structure cleanup.

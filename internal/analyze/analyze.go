@@ -1,7 +1,6 @@
 package analyze
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -37,14 +36,6 @@ func File(path string) (Report, error) {
 	r, err := read(f)
 	if err != nil {
 		return Report{}, fmt.Errorf("analyze %s: %w", path, err)
-	}
-	return r, nil
-}
-
-func Bytes(data []byte) (Report, error) {
-	r, err := read(bytes.NewReader(data))
-	if err != nil {
-		return Report{}, fmt.Errorf("analyze PDF: %w", err)
 	}
 	return r, nil
 }

@@ -1,6 +1,7 @@
 package optimize
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
@@ -20,7 +21,7 @@ func TestLosslessParsesAndWritesPDF(t *testing.T) {
 	if err := os.WriteFile(in, minimalPDF(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r, err := Lossless(in, out)
+	r, err := OptimizeWithOptions(in, out, ProfileLossless, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +39,7 @@ func TestLosslessParsesAndWritesPDF(t *testing.T) {
 
 func TestLosslessRejectsSamePath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "in.pdf")
-	if _, err := Lossless(path, path); err == nil {
+	if _, err := OptimizeWithOptions(path, path, ProfileLossless, Options{}); err == nil {
 		t.Fatal("expected an error")
 	}
 }
@@ -54,7 +55,7 @@ func TestLosslessRejectsHardLinkToInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := Lossless(input, output); err == nil {
+	if _, err := OptimizeWithOptions(input, output, ProfileLossless, Options{}); err == nil {
 		t.Fatal("expected an error")
 	}
 }
@@ -70,7 +71,7 @@ func TestLosslessRejectsSymbolicLinkToInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := Lossless(input, output); err == nil {
+	if _, err := OptimizeWithOptions(input, output, ProfileLossless, Options{}); err == nil {
 		t.Fatal("expected an error")
 	}
 }
@@ -176,9 +177,6 @@ func TestParseProfile(t *testing.T) {
 	if _, err := ParseProfile("tiny"); err == nil {
 		t.Fatal("expected unsupported profile error")
 	}
-	if got, err := ParseProfile("agressive"); err != nil || got != ProfileAggressive {
-		t.Fatalf("agressive alias: got %q, err %v", got, err)
-	}
 }
 
 func TestDownsample(t *testing.T) {
@@ -189,20 +187,11 @@ func TestDownsample(t *testing.T) {
 	}
 }
 
-func TestGrayTileClassification(t *testing.T) {
+func TestGrayImageBytes(t *testing.T) {
 	img := image.NewGray(image.Rect(0, 0, 2, 2))
-	if _, got := grayTile(img, img.Bounds()); got != alphaTransparent {
-		t.Fatalf("transparent classification: %v", got)
-	}
-	for i := range img.Pix {
-		img.Pix[i] = 255
-	}
-	if _, got := grayTile(img, img.Bounds()); got != alphaOpaque {
-		t.Fatalf("opaque classification: %v", got)
-	}
-	img.Pix[0] = 128
-	if _, got := grayTile(img, img.Bounds()); got != alphaMixed {
-		t.Fatalf("mixed classification: %v", got)
+	img.Pix = []byte{0, 64, 128, 255}
+	if got, want := grayImageBytes(img, img.Bounds()), img.Pix; !bytes.Equal(got, want) {
+		t.Fatalf("gray bytes = %v, want %v", got, want)
 	}
 }
 
@@ -217,6 +206,50 @@ func TestOptimizeTransparentImageSkipsBrokenSMaskReference(t *testing.T) {
 	settings := imageSettings{memoryBudget: NewMemoryBudget(0)}
 	if err := optimizeTransparentImage(ctx, 1, imageObject, nil, nil, settings); err != nil {
 		t.Fatalf("broken SMask aborted optimization: %v", err)
+	}
+}
+
+func TestTransparentImageCandidateDoesNotChangeXRefTable(t *testing.T) {
+	size := 1
+	ctx := &model.Context{XRefTable: &model.XRefTable{
+		Table: map[int]*model.XRefTableEntry{0: model.NewFreeHeadXRefTableEntry()},
+		Size:  &size,
+	}}
+	colorImage := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	maskImage := image.NewGray(image.Rect(0, 0, 64, 64))
+	before := len(ctx.Table)
+
+	imageStream, maskStream, _, err := transparentImageStreams(ctx.XRefTable, colorImage, maskImage, 65)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ctx.Table) != before {
+		t.Fatalf("candidate generation changed XRef table size from %d to %d", before, len(ctx.Table))
+	}
+	maskRef, err := ctx.IndRefForNewObject(*maskStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageStream.Insert("SMask", *maskRef)
+	if got := imageStream.IndirectRefEntry("SMask"); got == nil || got.ObjectNumber.Value() != maskRef.ObjectNumber.Value() {
+		t.Fatal("accepted candidate has no valid soft-mask reference")
+	}
+	if len(ctx.Table) != before+1 {
+		t.Fatalf("accepted candidate added %d objects, want 1", len(ctx.Table)-before)
+	}
+}
+
+func TestDecodeStreamImageReturnsErrorForTruncatedCMYK(t *testing.T) {
+	sd := &types.StreamDict{Dict: types.Dict{
+		"Width":            types.Integer(1),
+		"Height":           types.Integer(1),
+		"BitsPerComponent": types.Integer(8),
+		"ColorSpace":       types.Name(model.DeviceCMYKCS),
+	}, Content: []byte{}}
+	ctx := &model.Context{XRefTable: &model.XRefTable{Table: map[int]*model.XRefTableEntry{}}}
+
+	if _, err := decodeStreamImage(ctx, sd, 7); err == nil {
+		t.Fatal("expected a truncated CMYK decode error")
 	}
 }
 

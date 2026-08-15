@@ -211,14 +211,19 @@ func runDirectory(ctx context.Context, directory string, profile optimize.Profil
 	}
 	workers = min(workers, len(inputs))
 	results := make([]fileResult, len(inputs))
-	jobs := make(chan int)
+	jobs := make(chan int, len(inputs))
+	completed := make(chan int, len(inputs))
 	var wg sync.WaitGroup
+	if !quiet {
+		fmt.Fprintf(stderr, "Processing %d PDF files...\n", len(inputs))
+	}
 	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
 				results[i].text, results[i].err = processFile(ctx, inputs[i], "", profile, suffix, memoryBudget, reportOnly, quiet)
+				completed <- i
 			}
 		}()
 	}
@@ -233,9 +238,20 @@ func runDirectory(ctx context.Context, directory string, profile optimize.Profil
 		}
 	}
 	close(jobs)
+	for done := 1; done <= len(inputs); done++ {
+		i := <-completed
+		if !quiet {
+			status := "Done"
+			if results[i].err != nil {
+				status = "Failed"
+			}
+			fmt.Fprintf(stderr, "[%d/%d] %s: %s\n", done, len(inputs), status, filepath.Base(inputs[i]))
+		}
+	}
 	wg.Wait()
 
 	exitCode := 0
+	wroteReport := false
 	for i, result := range results {
 		if result.err != nil {
 			if ctx.Err() != nil {
@@ -246,7 +262,11 @@ func runDirectory(ctx context.Context, directory string, profile optimize.Profil
 			continue
 		}
 		if result.text != "" {
+			if wroteReport {
+				fmt.Fprintln(stdout)
+			}
 			fmt.Fprint(stdout, result.text)
+			wroteReport = true
 		}
 	}
 	if ctx.Err() != nil {

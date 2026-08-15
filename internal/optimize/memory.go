@@ -1,6 +1,7 @@
 package optimize
 
 import (
+	"context"
 	"math"
 	"sync"
 )
@@ -9,31 +10,40 @@ import (
 // It does not include the PDF object graph or memory owned by the Go runtime.
 type MemoryBudget struct {
 	mu        sync.Mutex
-	cond      *sync.Cond
+	changed   chan struct{}
 	capacity  int64
 	available int64
 }
 
 func NewMemoryBudget(capacity int64) *MemoryBudget {
-	b := &MemoryBudget{capacity: capacity, available: capacity}
-	b.cond = sync.NewCond(&b.mu)
-	return b
+	return &MemoryBudget{capacity: capacity, available: capacity, changed: make(chan struct{})}
 }
 
-func (b *MemoryBudget) acquire(bytes int64) bool {
+func (b *MemoryBudget) acquire(ctx context.Context, bytes int64) (bool, error) {
 	if b == nil || b.capacity <= 0 {
-		return true
+		return true, nil
 	}
 	if bytes <= 0 || bytes > b.capacity {
-		return false
+		return false, nil
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for bytes > b.available {
-		b.cond.Wait()
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		b.mu.Lock()
+		if bytes <= b.available {
+			b.available -= bytes
+			b.mu.Unlock()
+			return true, nil
+		}
+		changed := b.changed
+		b.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-changed:
+		}
 	}
-	b.available -= bytes
-	return true
 }
 
 func (b *MemoryBudget) release(bytes int64) {
@@ -42,8 +52,9 @@ func (b *MemoryBudget) release(bytes int64) {
 	}
 	b.mu.Lock()
 	b.available += bytes
+	close(b.changed)
+	b.changed = make(chan struct{})
 	b.mu.Unlock()
-	b.cond.Broadcast()
 }
 
 func estimatedImageMemory(width, height int, transparent bool) int64 {

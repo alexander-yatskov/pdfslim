@@ -8,15 +8,8 @@ import (
 	_ "github.com/mububoki/jpeg2000/jp2"
 )
 
-// Decoder converts an encoded image stream into pixels. The interface keeps
-// codec selection separate from PDF processing and allows bounded decoders to
-// be added later.
-type Decoder interface {
-	Decode(io.Reader) (image.Image, string, error)
-}
-
-type StandardDecoder struct{}
-
-func (StandardDecoder) Decode(r io.Reader) (image.Image, string, error) {
+// Decode converts an encoded image stream into pixels. The blank imports above
+// register JPEG 2000 codecs with the standard image package.
+func Decode(r io.Reader) (image.Image, string, error) {
 	return image.Decode(r)
 }

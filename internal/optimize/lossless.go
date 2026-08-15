@@ -13,12 +13,10 @@ import (
 	"sort"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 	"golang.org/x/image/draw"
 
-	"pdfslim/internal/imagecodec"
 	"pdfslim/internal/pdfconfig"
 )
 
@@ -34,10 +32,10 @@ const (
 )
 
 type imageSettings struct {
-	dpi             int
-	quality         int
-	tileTransparent bool
-	memoryBudget    *MemoryBudget
+	dpi                 int
+	quality             int
+	optimizeTransparent bool
+	memoryBudget        *MemoryBudget
 }
 
 type Options struct {
@@ -46,9 +44,6 @@ type Options struct {
 }
 
 func ParseProfile(s string) (Profile, error) {
-	if s == "agressive" {
-		return ProfileAggressive, nil
-	}
 	p := Profile(s)
 	switch p {
 	case ProfileLossless, ProfileBalanced, ProfileScreen, ProfilePrint, ProfileEbook, ProfileAggressive:
@@ -63,17 +58,6 @@ type Result struct {
 	After   int64
 	Saved   int64
 	Percent float64
-}
-
-// Lossless parses, validates, optimizes, and rewrites a PDF with pdfcpu.
-// It removes unused and duplicate resources and rebuilds the object and xref
-// structure. It does not resample images or change their visible quality.
-func Lossless(input, output string) (Result, error) {
-	return Optimize(input, output, ProfileLossless)
-}
-
-func Optimize(input, output string, profile Profile) (Result, error) {
-	return OptimizeWithOptions(input, output, profile, Options{})
 }
 
 func OptimizeWithOptions(input, output string, profile Profile, options Options) (Result, error) {
@@ -172,7 +156,7 @@ func settingsFor(profile Profile) (*imageSettings, error) {
 	case ProfileEbook:
 		return &imageSettings{dpi: 104, quality: 68}, nil
 	case ProfileAggressive:
-		return &imageSettings{dpi: 104, quality: 65, tileTransparent: true}, nil
+		return &imageSettings{dpi: 104, quality: 65, optimizeTransparent: true}, nil
 	default:
 		return nil, fmt.Errorf("unsupported profile %q", profile)
 	}
@@ -243,13 +227,17 @@ func optimizeImages(processCtx context.Context, ctx *model.Context, settings ima
 			continue
 		}
 		if hasSoftMask {
-			if settings.tileTransparent {
+			if settings.optimizeTransparent {
 				width, height := sd.IntEntry("Width"), sd.IntEntry("Height")
 				if width == nil || height == nil {
 					continue
 				}
 				memory := estimatedImageMemory(*width, *height, true)
-				if !settings.memoryBudget.acquire(memory) {
+				acquired, err := settings.memoryBudget.acquire(processCtx, memory)
+				if err != nil {
+					return err
+				}
+				if !acquired {
 					continue
 				}
 				if err := optimizeTransparentImage(ctx, objNr, imageObject, pageDims, renderedBounds, settings); err != nil {
@@ -265,31 +253,18 @@ func optimizeImages(processCtx context.Context, ctx *model.Context, settings ima
 			continue
 		}
 		memory := estimatedImageMemory(*width, *height, false)
-		if !settings.memoryBudget.acquire(memory) {
+		acquired, err := settings.memoryBudget.acquire(processCtx, memory)
+		if err != nil {
+			return err
+		}
+		if !acquired {
 			continue
 		}
-		r, fileType, err := pdfcpu.RenderImage(ctx.XRefTable, sd, false, "", objNr)
+		img, err := decodeStreamImage(ctx, sd, objNr)
 		if err != nil {
 			// A valid PDF may contain an image that pdfcpu cannot render, for
 			// example a malformed or unsupported Indexed color space. Keep that
 			// original object unchanged and continue with the remaining images.
-			settings.memoryBudget.release(memory)
-			continue
-		}
-		if r == nil {
-			settings.memoryBudget.release(memory)
-			continue
-		}
-		var img image.Image
-		if fileType == "jpx" {
-			if len(sd.Content) == 0 && len(sd.Raw) > 0 {
-				r = bytes.NewReader(sd.Raw)
-			}
-			img, _, err = (imagecodec.StandardDecoder{}).Decode(r)
-		} else {
-			img, _, err = image.Decode(r)
-		}
-		if err != nil {
 			settings.memoryBudget.release(memory)
 			continue
 		}
@@ -437,8 +412,6 @@ func downsample(src image.Image, maxW, maxH int) image.Image {
 	return dst
 }
 
-const aggressiveTileSize = 512
-
 func optimizeTransparentImage(ctx *model.Context, objNr int, imageObject *model.ImageObject, pageDims []types.Dim, renderedBounds map[int]imageBounds, settings imageSettings) error {
 	sd := imageObject.ImageDict
 	width, height := sd.IntEntry("Width"), sd.IntEntry("Height")
@@ -469,36 +442,32 @@ func optimizeTransparentImage(ctx *model.Context, objNr int, imageObject *model.
 	colorImage = downsample(colorImage, maxW, maxH)
 	maskImage = resizeTo(maskImage, colorImage.Bounds().Dx(), colorImage.Bounds().Dy())
 
-	form, encodedBytes, err := tiledForm(ctx, colorImage, maskImage, settings.quality)
+	replacement, replacementMask, encodedBytes, err := transparentImageStreams(ctx.XRefTable, colorImage, maskImage, settings.quality)
 	if err != nil {
 		return err
-	}
-	if form == nil {
-		return nil
 	}
 	originalBytes := *sd.StreamLength + *maskStream.StreamLength
 	if encodedBytes >= originalBytes {
 		return nil
 	}
-	ctx.Table[objNr].Object = *form
-	imageObject.ImageDict = nil
+	newMaskRef, err := ctx.IndRefForNewObject(*replacementMask)
+	if err != nil {
+		return err
+	}
+	replacement.Insert("SMask", *newMaskRef)
+	ctx.Table[objNr].Object = *replacement
+	imageObject.ImageDict = replacement
 	return nil
 }
 
-func decodeStreamImage(ctx *model.Context, sd *types.StreamDict, objNr int) (image.Image, error) {
-	r, fileType, err := pdfcpu.RenderImage(ctx.XRefTable, sd, false, "", objNr)
-	if err != nil {
-		return nil, err
-	}
-	if fileType == "jpx" && len(sd.Content) == 0 && len(sd.Raw) > 0 {
-		r = bytes.NewReader(sd.Raw)
-	}
-	if fileType == "jpx" {
-		img, _, err := (imagecodec.StandardDecoder{}).Decode(r)
-		return img, err
-	}
-	img, _, err := image.Decode(r)
-	return img, err
+func decodeStreamImage(ctx *model.Context, sd *types.StreamDict, objNr int) (img image.Image, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			img = nil
+			err = fmt.Errorf("render image object %d: %v", objNr, recovered)
+		}
+	}()
+	return renderStreamImage(ctx, sd, objNr)
 }
 
 func resizeTo(src image.Image, width, height int) image.Image {
@@ -510,106 +479,34 @@ func resizeTo(src image.Image, width, height int) image.Image {
 	return dst
 }
 
-func tiledForm(ctx *model.Context, colorImage, maskImage image.Image, quality int) (*types.StreamDict, int64, error) {
+func transparentImageStreams(xref *model.XRefTable, colorImage, maskImage image.Image, quality int) (*types.StreamDict, *types.StreamDict, int64, error) {
 	bounds := colorImage.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
-	xObjects := types.NewDict()
-	var content bytes.Buffer
-	var total int64
-	tileNumber := 0
-
-	for y := 0; y < height; y += aggressiveTileSize {
-		for x := 0; x < width; x += aggressiveTileSize {
-			tileBounds := image.Rect(x, y, min(x+aggressiveTileSize, width), min(y+aggressiveTileSize, height))
-			maskBytes, alphaState := grayTile(maskImage, tileBounds)
-			if alphaState == alphaTransparent {
-				continue
-			}
-			colorTile := cropRGBA(colorImage, tileBounds)
-			var jpegData bytes.Buffer
-			if err := jpeg.Encode(&jpegData, colorTile, &jpeg.Options{Quality: quality}); err != nil {
-				return nil, 0, err
-			}
-			imageStream, err := model.CreateDCTImageStreamDict(ctx.XRefTable, jpegData.Bytes(), tileBounds.Dx(), tileBounds.Dy(), 8, model.DeviceRGBCS)
-			if err != nil {
-				return nil, 0, err
-			}
-			total += int64(len(imageStream.Raw))
-			if alphaState == alphaMixed {
-				maskStream, err := model.CreateFlateImageStreamDict(ctx.XRefTable, maskBytes, nil, tileBounds.Dx(), tileBounds.Dy(), 8, model.DeviceGrayCS)
-				if err != nil {
-					return nil, 0, err
-				}
-				maskRef, err := ctx.IndRefForNewObject(*maskStream)
-				if err != nil {
-					return nil, 0, err
-				}
-				imageStream.Insert("SMask", *maskRef)
-				total += int64(len(maskStream.Raw))
-			}
-			imageRef, err := ctx.IndRefForNewObject(*imageStream)
-			if err != nil {
-				return nil, 0, err
-			}
-			name := fmt.Sprintf("T%d", tileNumber)
-			tileNumber++
-			xObjects[name] = *imageRef
-			tileW, tileH := float64(tileBounds.Dx())/float64(width), float64(tileBounds.Dy())/float64(height)
-			tileX := float64(x) / float64(width)
-			tileY := 1 - float64(tileBounds.Max.Y)/float64(height)
-			fmt.Fprintf(&content, "q %.8f 0 0 %.8f %.8f %.8f cm /%s Do Q\n", tileW, tileH, tileX, tileY, name)
-		}
+	var jpegData bytes.Buffer
+	if err := jpeg.Encode(&jpegData, colorImage, &jpeg.Options{Quality: quality}); err != nil {
+		return nil, nil, 0, err
 	}
-	if tileNumber == 0 {
-		return nil, 0, nil
-	}
-	form, err := ctx.NewStreamDictForBuf(content.Bytes())
+	imageStream, err := model.CreateDCTImageStreamDict(xref, jpegData.Bytes(), width, height, 8, model.DeviceRGBCS)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, 0, err
 	}
-	form.InsertName("Type", "XObject")
-	form.InsertName("Subtype", "Form")
-	form.Insert("BBox", types.NewNumberArray(0, 0, 1, 1))
-	form.Insert("Resources", types.Dict{"XObject": xObjects})
-	if err := form.Encode(); err != nil {
-		return nil, 0, err
+	maskBytes := grayImageBytes(maskImage, maskImage.Bounds())
+	maskStream, err := model.CreateFlateImageStreamDict(xref, maskBytes, nil, width, height, 8, model.DeviceGrayCS)
+	if err != nil {
+		return nil, nil, 0, err
 	}
-	total += int64(len(form.Raw))
-	return form, total, nil
+	return imageStream, maskStream, int64(len(imageStream.Raw) + len(maskStream.Raw)), nil
 }
 
-type alphaClass uint8
-
-const (
-	alphaTransparent alphaClass = iota
-	alphaOpaque
-	alphaMixed
-)
-
-func grayTile(src image.Image, bounds image.Rectangle) ([]byte, alphaClass) {
+func grayImageBytes(src image.Image, bounds image.Rectangle) []byte {
 	buf := make([]byte, 0, bounds.Dx()*bounds.Dy())
-	allZero, allFull := true, true
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		visitImageRowRange(src, y, bounds.Min.X, bounds.Max.X, func(_ int, r, g, b byte) {
 			gray := byte((19595*uint32(r) + 38470*uint32(g) + 7471*uint32(b) + 1<<15) >> 16)
 			buf = append(buf, gray)
-			allZero = allZero && gray == 0
-			allFull = allFull && gray == 255
 		})
 	}
-	if allZero {
-		return buf, alphaTransparent
-	}
-	if allFull {
-		return buf, alphaOpaque
-	}
-	return buf, alphaMixed
-}
-
-func cropRGBA(src image.Image, bounds image.Rectangle) *image.RGBA {
-	dst := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
-	draw.Draw(dst, dst.Bounds(), src, bounds.Min, draw.Src)
-	return dst
+	return buf
 }
 
 // deduplicateFontFiles makes font descriptors share an identical embedded font

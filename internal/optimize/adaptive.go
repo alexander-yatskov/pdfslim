@@ -97,13 +97,6 @@ func adaptiveImageStreamWithCCITT(img image.Image, quality int, tempDir string, 
 	return encodedImageStream(data, w, h, best.colorSpace, best.bpc, best.filter, best.decodeParms), nil
 }
 
-func writeCCITTG4Candidate(img image.Image, tempDir string) (imageCandidate, bool, error) {
-	if !analyzeImage(img).bilevel {
-		return imageCandidate{}, false, nil
-	}
-	return writeCCITTG4CandidateKnownBinary(img, tempDir)
-}
-
 func writeCCITTG4CandidateKnownBinary(img image.Image, tempDir string) (imageCandidate, bool, error) {
 	b := img.Bounds()
 	rows := make([][]byte, b.Dy())
@@ -208,10 +201,6 @@ func writeFlateCandidate(img image.Image, gray bool, tempDir string) (imageCandi
 	return imageCandidate{path: path, size: info.Size(), filter: filter.Flate}, nil
 }
 
-func writeIndexedCandidate(img image.Image, tempDir string) (imageCandidate, bool, error) {
-	return writeIndexedCandidateFromAnalysis(img, analyzeImage(img), tempDir)
-}
-
 func writeIndexedCandidateFromAnalysis(img image.Image, analysis imageAnalysis, tempDir string) (imageCandidate, bool, error) {
 	if !analysis.indexed {
 		return imageCandidate{}, false, nil
@@ -256,15 +245,6 @@ func writeIndexedCandidateFromAnalysis(img image.Image, analysis imageAnalysis, 
 	// Hex lookup data uses two PDF bytes for each palette byte.
 	size := info.Size() + int64(len(palette)*2)
 	return imageCandidate{path: path, size: size, filter: filter.Flate, colorSpace: colorSpace, bpc: bpc}, true, nil
-}
-
-func indexedPalette(img image.Image) (palette []byte, colors map[uint32]byte, ok bool) {
-	a := analyzeImage(img)
-	return a.palette, a.colors, a.indexed
-}
-
-func writeIndexedRows(w io.Writer, img image.Image, colors map[uint32]byte) error {
-	return writeIndexedRowsPacked(w, img, colors, 8)
 }
 
 func writeIndexedRowsPacked(w io.Writer, img image.Image, colors map[uint32]byte, bpc int) error {
@@ -336,10 +316,6 @@ func encodedStreamSize(sd *types.StreamDict) int64 {
 		return *sd.StreamLength
 	}
 	return int64(len(sd.Raw))
-}
-
-func isGrayImage(img image.Image) bool {
-	return analyzeImage(img).gray
 }
 
 type grayscaleView struct {

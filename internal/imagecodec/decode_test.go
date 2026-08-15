@@ -24,7 +24,6 @@ func TestDecodeJPXSamples(t *testing.T) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		t.Fatal(err)
 	}
-	decoder := StandardDecoder{}
 	for _, sample := range m.Samples {
 		t.Run(sample.File, func(t *testing.T) {
 			f, err := os.Open(filepath.Join("testdata/jpx", sample.File))
@@ -32,7 +31,7 @@ func TestDecodeJPXSamples(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer f.Close()
-			img, format, err := decoder.Decode(f)
+			img, format, err := Decode(f)
 			if err != nil {
 				t.Fatal(err)
 			}

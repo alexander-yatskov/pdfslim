@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -17,7 +18,7 @@ func TestBytesUsesPDFObjectGraph(t *testing.T) {
 		"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\nx\nendstream",
 	})
 
-	r, err := Bytes(pdf)
+	r, err := read(bytes.NewReader(pdf))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,7 @@ func TestBytesUsesPDFObjectGraph(t *testing.T) {
 }
 
 func TestRejectsNonPDF(t *testing.T) {
-	if _, err := Bytes([]byte("hello")); err == nil {
+	if _, err := read(bytes.NewReader([]byte("hello"))); err == nil {
 		t.Fatal("expected an error")
 	}
 }

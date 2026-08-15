@@ -97,6 +97,29 @@ func TestDirectoryProcessesPDFsInParallel(t *testing.T) {
 	}
 }
 
+func TestDirectoryShowsProgressAndSeparatesReports(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"one.pdf", "two.pdf"} {
+		if err := os.WriteFile(filepath.Join(dir, name), minimalPDF(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--report", "--workers", "2", dir}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr.String())
+	}
+	progress := stderr.String()
+	if !strings.Contains(progress, "Processing 2 PDF files...") ||
+		!strings.Contains(progress, "[1/2] Done:") ||
+		!strings.Contains(progress, "[2/2] Done:") {
+		t.Fatalf("missing directory progress: %s", progress)
+	}
+	if !strings.Contains(stdout.String(), "Revisions:  1\n\nFile:") {
+		t.Fatalf("reports are not separated: %s", stdout.String())
+	}
+}
+
 func TestDirectorySkipsFilesWithTargetSuffix(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"book.pdf", "old.ebook.pdf"} {

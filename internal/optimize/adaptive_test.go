@@ -65,7 +65,7 @@ func TestIndexedPixelsRejectsMoreThan256Colors(t *testing.T) {
 	for x := 0; x < 257; x++ {
 		img.SetRGBA(x, 0, color.RGBA{R: uint8(x), G: uint8(x >> 8), B: uint8(x * 31), A: 255})
 	}
-	if _, _, ok := indexedPalette(img); ok {
+	if analyzeImage(img).indexed {
 		t.Fatal("accepted image with more than 256 colors")
 	}
 }
@@ -79,7 +79,7 @@ func TestIndexedCandidateUsesPackedBits(t *testing.T) {
 				img.SetNRGBA(x, y, color.NRGBA{R: v, G: 255 - v, B: v * 11, A: 255})
 			}
 		}
-		candidate, ok, err := writeIndexedCandidate(img, t.TempDir())
+		candidate, ok, err := writeIndexedCandidateFromAnalysis(img, analyzeImage(img), t.TempDir())
 		if err != nil || !ok {
 			t.Fatalf("colors=%d ok=%v err=%v", tc.colors, ok, err)
 		}
@@ -167,7 +167,7 @@ func TestCCITTGroup4CandidateForBinaryGraphics(t *testing.T) {
 		}
 	}
 	tempDir := t.TempDir()
-	candidate, ok, err := writeCCITTG4Candidate(img, tempDir)
+	candidate, ok, err := writeCCITTG4CandidateKnownBinary(img, tempDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,14 +222,14 @@ func TestCCITTGroup4RejectsNonBinaryImage(t *testing.T) {
 	for i := range img.Pix {
 		img.Pix[i] = 127
 	}
-	if _, ok, err := writeCCITTG4Candidate(img, t.TempDir()); err != nil || ok {
-		t.Fatalf("ok=%v err=%v, want clean rejection", ok, err)
+	if analyzeImage(img).bilevel {
+		t.Fatal("non-binary image was classified as binary")
 	}
 }
 
 func TestCCITTGroup4RendersLosslessly(t *testing.T) {
 	img := binaryTestImage(257, 129)
-	candidate, ok, err := writeCCITTG4Candidate(img, t.TempDir())
+	candidate, ok, err := writeCCITTG4CandidateKnownBinary(img, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
