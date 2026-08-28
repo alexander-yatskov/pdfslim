@@ -162,6 +162,17 @@ Use `--quiet` to hide the normal operation report:
 
 Errors are still written to stderr.
 
+Use `--no-deduplicate-fonts` for PDFs that render incorrectly after font
+deduplication. This disables both font-file and font-dictionary deduplication;
+the output can be larger:
+
+```sh
+./pdfslim --preset aggressive --no-deduplicate-fonts document.pdf
+```
+
+For diagnostics, `--no-pdfcpu-font-deduplication` disables only pdfcpu's
+font-dictionary deduplication while retaining pdfslim's font-file deduplication.
+
 `SIGINT` and `SIGTERM` start a controlled shutdown. The tool stops new directory
 jobs, removes its temporary files, and exits with code 130.
 

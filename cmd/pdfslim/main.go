@@ -44,6 +44,8 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	workers := fs.Int("workers", defaultWorkers(), "number of parallel directory workers")
 	memoryLimitText := fs.String("memory-limit", "1GiB", "soft memory limit: bytes, KiB, MiB, GiB, or 0")
 	preset := fs.String("preset", "lossless", "optimization preset: lossless, balanced, screen, print, ebook, aggressive")
+	disableFontDeduplication := fs.Bool("no-deduplicate-fonts", false, "disable PDF font deduplication")
+	disablePDFCPUFontDeduplication := fs.Bool("no-pdfcpu-font-deduplication", false, "disable pdfcpu font-dictionary deduplication")
 	showVersion := fs.Bool("version", false, "show version")
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: pdfslim [options] input.pdf|directory")
@@ -107,9 +109,9 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer) in
 			fmt.Fprintln(stderr, "pdfslim: -o cannot be used with a directory")
 			return 2
 		}
-		return runDirectory(ctx, input, profile, *suffix, *workers, memoryBudget, *reportOnly || *analyzeOnly, *quiet, stdout, stderr)
+		return runDirectory(ctx, input, profile, *suffix, *workers, memoryBudget, *disableFontDeduplication, *disablePDFCPUFontDeduplication, *reportOnly || *analyzeOnly, *quiet, stdout, stderr)
 	}
-	text, err := processFile(ctx, input, *output, profile, *suffix, memoryBudget, *reportOnly || *analyzeOnly, *quiet)
+	text, err := processFile(ctx, input, *output, profile, *suffix, memoryBudget, *disableFontDeduplication, *disablePDFCPUFontDeduplication, *reportOnly || *analyzeOnly, *quiet)
 	if err != nil {
 		if ctx.Err() != nil {
 			fmt.Fprintln(stderr, "pdfslim: interrupted")
@@ -128,7 +130,7 @@ func defaultWorkers() int {
 	return min(runtime.NumCPU(), 2)
 }
 
-func processFile(ctx context.Context, input, output string, profile optimize.Profile, suffix string, memoryBudget *optimize.MemoryBudget, reportOnly, quiet bool) (string, error) {
+func processFile(ctx context.Context, input, output string, profile optimize.Profile, suffix string, memoryBudget *optimize.MemoryBudget, disableFontDeduplication, disablePDFCPUFontDeduplication, reportOnly, quiet bool) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -152,7 +154,12 @@ func processFile(ctx context.Context, input, output string, profile optimize.Pro
 	if destination == "" {
 		destination = outputPath(input, suffix)
 	}
-	result, err := optimize.OptimizeWithOptions(input, destination, profile, optimize.Options{Context: ctx, ImageMemoryBudget: memoryBudget})
+	result, err := optimize.OptimizeWithOptions(input, destination, profile, optimize.Options{
+		Context:                        ctx,
+		ImageMemoryBudget:              memoryBudget,
+		DisableFontDeduplication:       disableFontDeduplication,
+		DisablePDFCPUFontDeduplication: disablePDFCPUFontDeduplication,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -185,7 +192,7 @@ type fileResult struct {
 	err  error
 }
 
-func runDirectory(ctx context.Context, directory string, profile optimize.Profile, suffix string, workers int, memoryBudget *optimize.MemoryBudget, reportOnly, quiet bool, stdout, stderr io.Writer) int {
+func runDirectory(ctx context.Context, directory string, profile optimize.Profile, suffix string, workers int, memoryBudget *optimize.MemoryBudget, disableFontDeduplication, disablePDFCPUFontDeduplication, reportOnly, quiet bool, stdout, stderr io.Writer) int {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		fmt.Fprintf(stderr, "pdfslim: read directory: %v\n", err)
@@ -222,7 +229,7 @@ func runDirectory(ctx context.Context, directory string, profile optimize.Profil
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				results[i].text, results[i].err = processFile(ctx, inputs[i], "", profile, suffix, memoryBudget, reportOnly, quiet)
+				results[i].text, results[i].err = processFile(ctx, inputs[i], "", profile, suffix, memoryBudget, disableFontDeduplication, disablePDFCPUFontDeduplication, reportOnly, quiet)
 				completed <- i
 			}
 		}()
