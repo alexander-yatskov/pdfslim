@@ -39,8 +39,10 @@ type imageSettings struct {
 }
 
 type Options struct {
-	Context           context.Context
-	ImageMemoryBudget *MemoryBudget
+	Context                        context.Context
+	ImageMemoryBudget              *MemoryBudget
+	DisableFontDeduplication       bool
+	DisablePDFCPUFontDeduplication bool
 }
 
 func ParseProfile(s string) (Profile, error) {
@@ -109,11 +111,14 @@ func OptimizeWithOptions(input, output string, profile Profile, options Options)
 	conf := pdfconfig.New()
 	conf.WriteObjectStream = true
 	conf.WriteXRefStream = true
-	conf.Optimize = true
+	// pdfcpu's optimizer deduplicates whole font dictionaries while building its
+	// resource index. That happens before our font-file deduplication and can
+	// alter glyph mappings in PDFs with non-standard font resources.
+	conf.Optimize = !options.DisableFontDeduplication && !options.DisablePDFCPUFontDeduplication
 	conf.OptimizeResourceDicts = true
 	conf.OptimizeDuplicateContentStreams = true
 	conf.PostProcessValidate = true
-	if err := optimizeFile(ctx, input, tmpName, conf, settings); err != nil {
+	if err := optimizeFile(ctx, input, tmpName, conf, settings, !options.DisableFontDeduplication); err != nil {
 		return Result{}, fmt.Errorf("parse and optimize PDF: %w", err)
 	}
 
@@ -162,7 +167,7 @@ func settingsFor(profile Profile) (*imageSettings, error) {
 	}
 }
 
-func optimizeFile(processCtx context.Context, input, output string, conf *model.Configuration, settings *imageSettings) error {
+func optimizeFile(processCtx context.Context, input, output string, conf *model.Configuration, settings *imageSettings, deduplicateFonts bool) error {
 	in, err := os.Open(input)
 	if err != nil {
 		return err
@@ -176,8 +181,10 @@ func optimizeFile(processCtx context.Context, input, output string, conf *model.
 	if err := processCtx.Err(); err != nil {
 		return err
 	}
-	if err := deduplicateFontFiles(pdfCtx); err != nil {
-		return fmt.Errorf("deduplicate embedded fonts: %w", err)
+	if deduplicateFonts {
+		if err := deduplicateFontFiles(pdfCtx); err != nil {
+			return fmt.Errorf("deduplicate embedded fonts: %w", err)
+		}
 	}
 	if settings != nil {
 		if err := optimizeImages(processCtx, pdfCtx, *settings); err != nil {
@@ -210,7 +217,11 @@ func optimizeImages(processCtx context.Context, ctx *model.Context, settings ima
 	}
 	renderedBounds := renderedImageBounds(ctx, settings.dpi)
 	maskObjects := referencedMaskObjects(ctx)
-	for objNr, imageObject := range ctx.Optimize.ImageObjects {
+	imageObjects := ctx.Optimize.ImageObjects
+	if len(imageObjects) == 0 {
+		imageObjects = imageObjectsFromRenderedBounds(ctx, renderedBounds)
+	}
+	for objNr, imageObject := range imageObjects {
 		if err := processCtx.Err(); err != nil {
 			return err
 		}
@@ -291,6 +302,28 @@ func optimizeImages(processCtx context.Context, ctx *model.Context, settings ima
 		settings.memoryBudget.release(memory)
 	}
 	return nil
+}
+
+// imageObjectsFromRenderedBounds builds the image index needed for image
+// optimization without calling pdfcpu's OptimizeContext. The latter can merge
+// font dictionaries in PDFs whose equal-looking fonts are not interchangeable.
+// Restricting the index to images seen in page content also ensures every image
+// has an actual rendered size before it is considered for downsampling.
+func imageObjectsFromRenderedBounds(ctx *model.Context, bounds map[int]imageBounds) map[int]*model.ImageObject {
+	images := make(map[int]*model.ImageObject, len(bounds))
+	for objNr := range bounds {
+		entry := ctx.Table[objNr]
+		if entry == nil || entry.Free || entry.Object == nil {
+			continue
+		}
+		stream, ok := entry.Object.(types.StreamDict)
+		if !ok || !stream.Image() {
+			continue
+		}
+		image := stream
+		images[objNr] = &model.ImageObject{ImageDict: &image}
+	}
+	return images
 }
 
 func safeCCITTSource(sd *types.StreamDict) bool {

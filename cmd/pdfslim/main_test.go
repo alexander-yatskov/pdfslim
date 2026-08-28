@@ -49,6 +49,23 @@ func TestQuietWritesOutputWithoutOperationDetails(t *testing.T) {
 	}
 }
 
+func TestNoDeduplicateFontsWritesOutput(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "in.pdf")
+	output := filepath.Join(dir, "out.pdf")
+	if err := os.WriteFile(input, minimalPDF(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--quiet", "--no-deduplicate-fonts", "-o", output, input}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, stderr.String())
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("missing output: %v", err)
+	}
+}
+
 func TestQuietRejectsReport(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"--quiet", "--report", "in.pdf"}, &stdout, &stderr); code != 2 {
